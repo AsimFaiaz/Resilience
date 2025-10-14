@@ -4,9 +4,7 @@
   ![Status](https://img.shields.io/badge/status-stable-blue)
   ![Build](https://img.shields.io/badge/build-passing-brightgreen)
   ![License](https://img.shields.io/badge/license-MIT-lightgrey)
-
-  <br>
-
+  
   <h2>Overview</h2>
   <p>
     <strong>Resilience</strong> is a single-file C# utility that combines three powerful reliability
