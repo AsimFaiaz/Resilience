@@ -115,6 +115,62 @@ using Demo.Resilience;
     the same robustness you’d expect from enterprise-grade frameworks.
   </p>
 
+  <h2>Manual Testing - .NET Fiddle</h2>
+  <pre>
+//To Test in .NET Fiddle simply paste this code under the main CS code
+    public static class Program
+    {
+        public static async Task Main()
+        {
+            var breaker = new CircuitBreaker(new CircuitBreakerOptions
+            {
+                FailuresBeforeOpen = 3,
+                OpenInterval = TimeSpan.FromSeconds(5),
+                OnStateChange = s => Console.WriteLine($"[Circuit] {s}")
+            });
+
+            var retry = new RetryOptions
+            {
+                MaxRetries = 4,
+                OnRetry = (n, d, ex) => Console.WriteLine($"[Retry] Attempt {n} after {d.TotalMilliseconds:N0}ms ({ex.GetType().Name})")
+            };
+
+            var timeout = new TimeoutOptions
+            {
+                Timeout = TimeSpan.FromMilliseconds(500),
+                OnTimeout = t => Console.WriteLine($"[Timeout] Operation exceeded {t.TotalMilliseconds:N0}ms")
+            };
+
+            var rnd = new Random();
+
+            for (int i = 1; i <= 10; i++)
+            {
+                try
+                {
+                    var result = await Resilience.ExecuteAsync(async ct =>
+                    {
+                        var delay = rnd.Next(100, 1000);
+                        await Task.Delay(delay, ct);
+                        if (delay > 600) throw new Exception("Simulated failure");
+                        return $"Success after {delay}ms";
+                    },
+                    retry, timeout, breaker);
+
+                    Console.WriteLine($"{result}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Final failure: {ex.Message}");
+                }
+
+                await Task.Delay(800);
+            }
+
+            Console.WriteLine("Done.");
+        }
+    }
+  </pre>
+
   <section id="tech-stack">
     <h2>Tech Stack</h2>
     <pre>☑ C# (.NET 8 or newer)</pre>
