@@ -2,6 +2,7 @@
 // One-file resilience helpers: Retry (exp backoff + jitter), Timeout, CircuitBreaker.
 // Author: Asim Faiaz
 // License: MIT
+// #nullable enable
 
 using System;
 using System.Diagnostics;
@@ -16,7 +17,7 @@ namespace Demo.Resilience
         public TimeSpan BaseDelay { get; init; } = TimeSpan.FromMilliseconds(200);
         public TimeSpan MaxDelay { get; init; } = TimeSpan.FromSeconds(5);
         public double JitterRatio { get; init; } = 0.25;
-        public Func<Exception, bool>? ShouldRetryOn { get; init; } = null; // null = retry on any exception
+        public Func<Exception, bool>? ShouldRetryOn { get; init; } = null;
         public Action<int, TimeSpan, Exception>? OnRetry { get; init; } = null;
     }
 
@@ -40,7 +41,7 @@ namespace Demo.Resilience
     {
         private readonly CircuitBreakerOptions _opt;
         private int _consecutiveFailures = 0;
-        private CircuitState _state = CircuitState.Closed;
+        private volatile CircuitState _state = CircuitState.Closed;
         private long _nextTransitionTicks = 0;
 
         public CircuitBreaker(CircuitBreakerOptions? options = null)
@@ -48,7 +49,7 @@ namespace Demo.Resilience
             _opt = options ?? new CircuitBreakerOptions();
         }
 
-        public bool IsClosed => Volatile.Read(ref _state) == CircuitState.Closed;
+        public bool IsClosed => _state == CircuitState.Closed;
 
         private void Transition(CircuitState newState)
         {
@@ -56,7 +57,7 @@ namespace Demo.Resilience
             _state = newState;
             if (newState == CircuitState.Open)
                 _nextTransitionTicks = DateTime.UtcNow.Add(_opt.OpenInterval).Ticks;
-            if (newState == CircuitState.HalfOpen)
+            else if (newState == CircuitState.HalfOpen)
                 _nextTransitionTicks = DateTime.UtcNow.Add(_opt.HalfOpenProbeInterval).Ticks;
 
             _opt.OnStateChange?.Invoke($"{old} -> {newState}");
@@ -65,7 +66,8 @@ namespace Demo.Resilience
         public void OnSuccess()
         {
             _consecutiveFailures = 0;
-            if (_state != CircuitState.Closed) Transition(CircuitState.Closed);
+            if (_state != CircuitState.Closed)
+                Transition(CircuitState.Closed);
         }
 
         public void OnFailure()
@@ -76,13 +78,11 @@ namespace Demo.Resilience
         }
 
         private bool CanProbeHalfOpen()
-        {
-            return DateTime.UtcNow.Ticks >= Interlocked.Read(ref _nextTransitionTicks);
-        }
+            => DateTime.UtcNow.Ticks >= Interlocked.Read(ref _nextTransitionTicks);
 
         public void ThrowIfOpen()
         {
-            var s = Volatile.Read(ref _state);
+            var s = _state;
             if (s == CircuitState.Open && !CanProbeHalfOpen())
                 throw new CircuitOpenException("Circuit is open; calls are short-circuited.");
 
@@ -98,7 +98,7 @@ namespace Demo.Resilience
 
     public static class Resilience
     {
-        private static readonly Random _rng = new Random();
+        private static readonly Random _rng = new();
 
         public static async Task<T> ExecuteAsync<T>(
             Func<CancellationToken, Task<T>> action,
@@ -117,24 +117,21 @@ namespace Demo.Resilience
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // Circuit breaker gate
                 circuit?.ThrowIfOpen();
 
-                var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 cts.CancelAfter(timeout.Timeout);
                 var sw = Stopwatch.StartNew();
 
                 try
                 {
                     var result = await action(cts.Token).ConfigureAwait(false);
-
                     sw.Stop();
-                    circuit?.OnSuccess(); // reset breaker
+                    circuit?.OnSuccess();
                     return result;
                 }
                 catch (OperationCanceledException oce) when (!cancellationToken.IsCancellationRequested && cts.IsCancellationRequested)
                 {
-                    // Timed out
                     sw.Stop();
                     timeout.OnTimeout?.Invoke(timeout.Timeout);
                     last = new TimeoutException($"Operation exceeded timeout of {timeout.Timeout}.", oce);
@@ -151,7 +148,7 @@ namespace Demo.Resilience
                 if (attempt > retry.MaxRetries)
                     throw last!;
 
-                if (retry.ShouldRetryOn != null && last != null && !retry.ShouldRetryOn(last))
+                if (retry.ShouldRetryOn is not null && last is not null && !retry.ShouldRetryOn(last))
                     throw last;
 
                 var delay = ComputeBackoff(attempt, retry.BaseDelay, retry.MaxDelay, retry.JitterRatio);
@@ -167,14 +164,18 @@ namespace Demo.Resilience
             TimeoutOptions? timeout = null,
             CircuitBreaker? circuit = null,
             CancellationToken cancellationToken = default)
-            => await ExecuteAsync(async ct => { await action(ct).ConfigureAwait(false); return true; },
+            => await ExecuteAsync(async ct =>
+            {
+                await action(ct).ConfigureAwait(false);
+                return true;
+            },
                                   retry, timeout, circuit, cancellationToken).ConfigureAwait(false);
 
         private static TimeSpan ComputeBackoff(int attempt, TimeSpan baseDelay, TimeSpan maxDelay, double jitterRatio)
         {
             var expMs = baseDelay.TotalMilliseconds * Math.Pow(2, attempt - 1);
             var capped = Math.Min(expMs, maxDelay.TotalMilliseconds);
-            var jitter = jitterRatio <= 0 ? 0 : _rng.NextDouble() * jitterRatio * capped; // [0, jitter% of capped]
+            var jitter = jitterRatio <= 0 ? 0 : _rng.NextDouble() * jitterRatio * capped;
             return TimeSpan.FromMilliseconds(Math.Max(0, capped + jitter));
         }
     }
